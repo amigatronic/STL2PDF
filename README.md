@@ -2,6 +2,9 @@
 
 Generate dimensioned technical reports from STL models: a printable **PDF** sheet, an **interactive 3D HTML** report, or both. Includes a desktop GUI and a command-line interface.
 
+![GUI](screenshots/GUI.png)
+
+
 ## Features
 
 - PDF sheet with four views (three axonometric views plus one extra angle), overall dimensions, bounds, triangle/vertex counts, connected components, surface area, and volume.
