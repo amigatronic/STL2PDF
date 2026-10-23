@@ -23,7 +23,7 @@ Generate dimensioned technical reports from STL models: a printable **PDF** shee
 ## Installation
 
 ```bat
-git clone https://github.com/<your-user>/stl2pdf.git
+git clone https://github.com/amigatronic/stl2pdf.git
 cd stl2pdf
 python -m venv .venv
 .venv\Scripts\activate
