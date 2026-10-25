@@ -10,6 +10,9 @@ dist/
 venv/
 env/
 
+# Tests
+.pytest_cache/
+
 # Editors
 .idea/
 .vscode/

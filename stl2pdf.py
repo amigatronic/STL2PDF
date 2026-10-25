@@ -10,6 +10,7 @@ Examples:
     python stl2pdf.py model.stl
     python stl2pdf.py model.stl --format both --paper A3
     python stl2pdf.py models/ --format html --paper A5 -o reports/
+    python stl2pdf.py models/ --recursive --merge combined.pdf
     python stl2pdf.py model.stl --format pdf --paper A1 --landscape
     python stl2pdf.py model.stl --merge combined.pdf --paper A4
 """
@@ -22,7 +23,7 @@ import json
 import os
 import sys
 import threading
-import traceback
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
@@ -144,9 +145,36 @@ def shade_vertices(normals: np.ndarray, color: str) -> np.ndarray:
     return np.rint(rgb * 255.0).astype(int)
 
 
-def render_view_images(mesh: trimesh.Trimesh, views, color: str, size=(1400, 1400)) -> list[np.ndarray]:
+@dataclass
+class ModelData:
+    """Everything derived from one STL file, computed once and shared by all renderers."""
+
+    path: Path
+    mesh: trimesh.Trimesh
+    metrics: dict
+    poly: pv.PolyData
+
+
+def prepare_model(path: Path) -> ModelData:
+    """Load an STL file and compute metrics and smooth normals a single time."""
+    mesh = load_mesh(path)
+    return ModelData(path=path, mesh=mesh, metrics=mesh_metrics(mesh), poly=smooth_polydata(mesh))
+
+
+def unique_stem(stem: str, used: set[str]) -> str:
+    """Return a file stem not used yet in this run, appending _2, _3, ... on collisions."""
+    candidate, counter = stem, 2
+    while candidate.casefold() in used:
+        candidate = f"{stem}_{counter}"
+        counter += 1
+    used.add(candidate.casefold())
+    return candidate
+
+
+def render_view_images(model: ModelData, views, color: str, size=(1400, 1400)) -> list[np.ndarray]:
     """Render all views off-screen with a real z-buffer (VTK) and return RGB images."""
-    poly = smooth_polydata(mesh)
+    mesh = model.mesh
+    poly = model.poly
 
     mn, mx = np.asarray(mesh.bounds, dtype=float)
     center = (mn + mx) / 2.0
@@ -186,38 +214,21 @@ def render_view_images(mesh: trimesh.Trimesh, views, color: str, size=(1400, 140
             ]
             plotter.camera.parallel_scale = scale
             plotter.reset_camera_clipping_range()
+            plotter.render()  # without an explicit render, screenshot() can return the previous view
             images.append(plotter.screenshot(return_img=True))
     finally:
         plotter.close()
     return images
 
 
-def add_dimension_box(ax, mesh, color="#333333") -> None:
-    """Draw a thin bounding box and dimension labels around the model."""
-    mn, mx = mesh.bounds
-    corners = np.array([
-        [mn[0], mn[1], mn[2]], [mx[0], mn[1], mn[2]],
-        [mx[0], mx[1], mn[2]], [mn[0], mx[1], mn[2]],
-        [mn[0], mn[1], mx[2]], [mx[0], mn[1], mx[2]],
-        [mx[0], mx[1], mx[2]], [mn[0], mx[1], mx[2]],
-    ])
-    edges = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
-    for a, b in edges:
-        ax.plot(*zip(corners[a], corners[b]), color=color, linewidth=0.55, alpha=0.65)
-    ext = mx - mn
-    ax.text(mx[0], mn[1], mn[2], f" X {format_number(ext[0])}", fontsize=6, color=color)
-    ax.text(mn[0], mx[1], mn[2], f" Y {format_number(ext[1])}", fontsize=6, color=color)
-    ax.text(mn[0], mn[1], mx[2], f" Z {format_number(ext[2])}", fontsize=6, color=color)
-
-
-def build_pdf_page(path: Path, color: str, paper: str, landscape: bool):
-    mesh = load_mesh(path)
-    metrics = mesh_metrics(mesh)
+def build_pdf_page(model: ModelData, color: str, paper: str, landscape: bool, stem: str | None = None):
+    path, metrics = model.path, model.metrics
+    report_stem = stem or path.stem
     width, height = PAPER_SIZES[paper]
     if landscape:
         width, height = height, width
 
-    images = render_view_images(mesh, VIEWS, color)
+    images = render_view_images(model, VIEWS, color)
 
     fig = plt.figure(figsize=(width, height), facecolor="white")
     fig.suptitle(path.name, fontsize=16 if paper in ("A5", "A4") else 22, fontweight="bold", y=0.975)
@@ -242,7 +253,7 @@ def build_pdf_page(path: Path, color: str, paper: str, landscape: bool):
     details.append(unit_note)
     fig.text(0.055, 0.055, "\n".join(details), fontsize=8 if paper in ("A5", "A4") else 11,
              va="bottom", family="monospace", linespacing=1.5)
-    interactive_name = f"{path.stem}.html"
+    interactive_name = f"{report_stem}.html"
     fig.text(0.97, 0.018, f"Open interactive 3D report: {interactive_name}",
              ha="right", va="bottom", fontsize=7, color="#1558a6",
              url=interactive_name)
@@ -250,10 +261,8 @@ def build_pdf_page(path: Path, color: str, paper: str, landscape: bool):
     return fig
 
 
-def build_html(path: Path, color: str) -> str:
-    mesh = load_mesh(path)
-    metrics = mesh_metrics(mesh)
-    poly = smooth_polydata(mesh)
+def build_html(model: ModelData, color: str) -> str:
+    path, metrics, poly = model.path, model.metrics, model.poly
     vertices = np.asarray(poly.points)
     faces = poly.faces.reshape(-1, 4)[:, 1:]
     vertex_colors = shade_vertices(np.asarray(poly.point_data["Normals"]), color)
@@ -281,7 +290,6 @@ def build_html(path: Path, color: str) -> str:
             hovertemplate="X: %{x:.4f}<br>Y: %{y:.4f}<br>Z: %{z:.4f}<extra></extra>",
         ), row=row, col=col)
         scene_name = "scene" if index == 0 else f"scene{index + 1}"
-        center = np.asarray(mesh.bounds, dtype=float).mean(axis=0)
         fig.layout[scene_name].update(
             camera={**camera, "center": {"x": 0, "y": 0, "z": 0}, "projection": {"type": "orthographic"}},
             aspectmode="data",
@@ -338,10 +346,15 @@ header h1 {{ margin: 0; font-size: 1.35rem; overflow-wrap: anywhere; }} main {{ 
 </style></head><body><header><h1>STL Technical Report</h1></header><main><div class="viewer">{html_plot}</div>{details}</main></body></html>"""
 
 
-def discover_files(source: Path) -> list[Path]:
-    if source.is_dir():
-        return sorted((p for p in source.iterdir() if p.is_file() and p.suffix.lower() == ".stl"), key=lambda p: p.name.lower())
-    return [source]
+def discover_files(source: Path, recursive: bool = False) -> list[Path]:
+    """Return the STL files for a file or folder; folders can be scanned recursively."""
+    if not source.is_dir():
+        return [source]
+    candidates = source.rglob("*") if recursive else source.iterdir()
+    return sorted(
+        (p for p in candidates if p.is_file() and p.suffix.lower() == ".stl"),
+        key=lambda p: str(p).casefold(),
+    )
 
 
 def generate_reports(
@@ -356,22 +369,32 @@ def generate_reports(
     log_callback=None,
 ) -> tuple[int, list[Path]]:
     """Generate reports and optionally notify a graphical interface."""
+    if merge_path and output_format == "html":
+        raise ValueError("Merging pages requires PDF output.")
     output_dir.mkdir(parents=True, exist_ok=True)
     failures = 0
     generated: list[Path] = []
-    merged_pdf = PdfPages(merge_path) if merge_path else None
+    used_stems: set[str] = set()
+    merged_pdf = None
+    merged_pages = 0
+    if merge_path:
+        merge_path.parent.mkdir(parents=True, exist_ok=True)
+        merged_pdf = PdfPages(merge_path)
     try:
         for index, path in enumerate(files, start=1):
             if log_callback:
                 log_callback(f"Processing {path.name} ({index}/{len(files)})...")
             try:
+                model = prepare_model(path)
+                stem = unique_stem(path.stem, used_stems)
                 if output_format in ("pdf", "both"):
-                    figure = build_pdf_page(path, color, paper, landscape)
+                    figure = build_pdf_page(model, color, paper, landscape, stem)
                     try:
                         if merged_pdf:
                             merged_pdf.savefig(figure, facecolor="white")
+                            merged_pages += 1
                         else:
-                            pdf_path = output_dir / f"{path.stem}.pdf"
+                            pdf_path = output_dir / f"{stem}.pdf"
                             figure.savefig(pdf_path, facecolor="white")
                             generated.append(pdf_path)
                             if log_callback:
@@ -379,8 +402,8 @@ def generate_reports(
                     finally:
                         plt.close(figure)
                 if output_format in ("html", "both"):
-                    html_path = output_dir / f"{path.stem}.html"
-                    html_path.write_text(build_html(path, color), encoding="utf-8")
+                    html_path = output_dir / f"{stem}.html"
+                    html_path.write_text(build_html(model, color), encoding="utf-8")
                     generated.append(html_path)
                     if log_callback:
                         log_callback(f"Created HTML: {html_path}")
@@ -393,9 +416,14 @@ def generate_reports(
     finally:
         if merged_pdf:
             merged_pdf.close()
-            generated.append(merge_path)
-            if log_callback:
-                log_callback(f"Created merged PDF: {merge_path}")
+            if merged_pages:
+                generated.append(merge_path)
+                if log_callback:
+                    log_callback(f"Created merged PDF: {merge_path}")
+            else:
+                merge_path.unlink(missing_ok=True)
+                if log_callback:
+                    log_callback("No pages were produced; the merged PDF was not created.")
     return failures, generated
 
 
@@ -416,6 +444,7 @@ class STL2PDFApp:
         self.paper_var = tk.StringVar(value="A4")
         self.orientation_var = tk.StringVar(value="Portrait")
         self.merge_var = tk.BooleanVar(value=False)
+        self.recursive_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Ready. Select one or more STL files to begin.")
 
         self._build_ui()
@@ -468,6 +497,7 @@ class STL2PDFApp:
         file_buttons.pack(fill="x")
         ttk.Button(file_buttons, text="Add STL files...", command=self.add_files).pack(side="left")
         ttk.Button(file_buttons, text="Add folder...", command=self.add_folder).pack(side="left", padx=(8, 0))
+        ttk.Checkbutton(file_buttons, text="Include subfolders", variable=self.recursive_var).pack(side="left", padx=(8, 0))
         ttk.Button(file_buttons, text="Remove selected", command=self.remove_selected).pack(side="left", padx=(8, 0))
         ttk.Button(file_buttons, text="Clear list", command=self.clear_files).pack(side="right")
 
@@ -540,7 +570,7 @@ class STL2PDFApp:
     def add_folder(self):
         folder = filedialog.askdirectory(title="Select a folder containing STL models")
         if folder:
-            paths = sorted((p for p in Path(folder).iterdir() if p.is_file() and p.suffix.lower() == ".stl"), key=lambda p: p.name.lower())
+            paths = discover_files(Path(folder), recursive=self.recursive_var.get())
             self._add_paths(paths)
             if not paths:
                 messagebox.showinfo("No STL files", "The selected folder does not contain any STL files.", parent=self.root)
@@ -594,6 +624,9 @@ class STL2PDFApp:
         if not self.output_dir_var.get().strip():
             messagebox.showwarning("Output folder required", "Choose an output folder.", parent=self.root)
             return
+        if output_dir.exists() and not output_dir.is_dir():
+            messagebox.showwarning("Invalid output folder", "The output path exists but is not a folder.", parent=self.root)
+            return
         output_format = self.format_var.get()
         merge_path = self.merge_path if self.merge_var.get() else None
         if self.merge_var.get() and output_format == "html":
@@ -604,9 +637,6 @@ class STL2PDFApp:
             if self.merge_path is None:
                 return
             merge_path = self.merge_path
-        if merge_path and output_format == "both":
-            # HTML reports are still emitted individually; only PDF pages are merged.
-            pass
         try:
             matplotlib.colors.to_rgb(self.color)
         except ValueError:
@@ -674,7 +704,8 @@ def main() -> int:
     parser.add_argument("--paper", choices=tuple(PAPER_SIZES), default="A4", help="PDF paper size (default: A4)")
     parser.add_argument("--landscape", action="store_true", help="Use landscape orientation for the PDF")
     parser.add_argument("--merge", metavar="FILE.pdf", help="Combine all input models into one multi-page PDF")
-    parser.add_argument("--color", default="#4a90d9", help="Model color in hexadecimal notation (default: #4a90d9)")
+    parser.add_argument("-r", "--recursive", action="store_true", help="Scan subfolders when the input is a directory")
+    parser.add_argument("--color", default=DEFAULT_COLOR, help=f"Model color in hexadecimal notation (default: {DEFAULT_COLOR})")
     args = parser.parse_args()
 
     try:
@@ -685,13 +716,15 @@ def main() -> int:
     source = Path(args.input)
     if not source.exists():
         parser.error(f"Input path does not exist: {source}")
-    files = discover_files(source)
+    files = discover_files(source, recursive=args.recursive)
     if not files:
         parser.error("No STL files found in the input path.")
     if args.merge and args.format == "html":
         parser.error("--merge can only be used when PDF output is enabled.")
 
     output_dir = Path(args.outdir) if args.outdir else (source if source.is_dir() else source.parent)
+    if output_dir.exists() and not output_dir.is_dir():
+        parser.error(f"Output path exists but is not a directory: {output_dir}")
     failures, _ = generate_reports(files, output_dir, args.format, args.paper, args.landscape, args.color,
                                    merge_path=Path(args.merge) if args.merge else None,
                                    log_callback=print)
