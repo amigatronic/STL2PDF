@@ -4,12 +4,11 @@ Generate dimensioned technical reports from STL models: a printable **PDF** shee
 
 ![GUI](screenshots/GUI.png)
 
-
 ## Features
 
 - PDF sheet with four views (three axonometric views plus one extra angle), overall dimensions, bounds, triangle/vertex counts, connected components, surface area, and volume.
 - Self-contained interactive HTML report (Plotly.js is embedded, so it works offline) with four interactive 3D views (orthographic projection) and the same metrics.
-- Batch processing of single files or whole folders.
+- Batch processing of single files or whole folders, optionally including subfolders.
 - Optional merge of all PDF pages into one multi-page PDF.
 - Paper sizes A5, A4, A3, A1, portrait or landscape.
 - Custom model color (the GUI remembers your last choice).
@@ -40,7 +39,7 @@ Run the script without arguments:
 python stl2pdf.py
 ```
 
-Add files or a folder, choose the output folder, format, paper size, orientation, and color, then click **Generate reports**.
+Add files or a folder (tick **Include subfolders** to scan nested folders), choose the output folder, format, paper size, orientation, and color, then click **Generate reports**.
 
 ### Command line
 
@@ -50,12 +49,14 @@ python stl2pdf.py model.stl --format both --paper A3
 python stl2pdf.py models\ --format html --paper A5 -o reports\
 python stl2pdf.py model.stl --format pdf --paper A1 --landscape
 python stl2pdf.py models\ --merge combined.pdf --paper A4
+python stl2pdf.py models\ --recursive --format html -o reports\
 ```
 
 | Option | Description | Default |
 | --- | --- | --- |
 | `input` | An STL file or a directory containing STL files | required |
 | `-o`, `--outdir` | Output directory | input directory |
+| `-r`, `--recursive` | Scan subfolders when the input is a directory | off |
 | `--format` | `pdf`, `html`, or `both` | `both` |
 | `--paper` | `A5`, `A4`, `A3`, or `A1` | `A4` |
 | `--landscape` | Landscape orientation for the PDF | portrait |
@@ -66,11 +67,11 @@ python stl2pdf.py models\ --merge combined.pdf --paper A4
 
 ## Output
 
-For each `model.stl` the tool writes `model.pdf` and/or `model.html` to the output folder. The PDF contains a link to `model.html`; keep both files in the same folder for the link to work. With `--merge`, the PDF pages go into the single merged file instead, and the per-model link is not meaningful.
+For each `model.stl` the tool writes `model.pdf` and/or `model.html` to the output folder. If several inputs share the same file name (for example `a\part.stl` and `b\part.stl`), later ones get a numeric suffix (`part_2.pdf`, `part_2.html`) so nothing is overwritten. The PDF contains a link to `model.html`; keep both files in the same folder for the link to work. With `--merge`, the PDF pages go into the single merged file instead, and the per-model link is not meaningful.
 
 ## How it works
 
-- **Loading:** models are loaded with `trimesh`, vertices are merged, and face normals are fixed. Scenes with several meshes are concatenated.
+- **Loading:** models are loaded with `trimesh`, vertices are merged, and face normals are fixed. Scenes with several meshes are concatenated. Each file is loaded and analyzed once and the result is shared by the PDF and HTML renderers.
 - **PDF views:** rendered off-screen with VTK (through `pyvista`) using a real z-buffer, parallel projection, and smooth normals split on sharp edges (35 degrees). The images are placed on the page with `matplotlib`. Views are raster images; increase the render size in `render_view_images` for very large paper sizes.
 - **HTML views:** drawn with Plotly `Mesh3d`. Shading is precomputed per vertex with two fixed lights and Plotly's own lighting is disabled, which avoids the shading artifacts Plotly produces on thin CAD triangles. The lights are fixed in model space and do not follow the camera.
 
@@ -79,6 +80,20 @@ For each `model.stl` the tool writes `model.pdf` and/or `model.html` to the outp
 - STL files do not store a unit. All dimensions, areas, and volumes are reported in raw file units.
 - Volume is computed only for watertight meshes.
 - The last chosen model color is stored in `%APPDATA%\stl2pdf\settings.json`.
+
+## Development
+
+```bat
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+Rendering tests need an OpenGL-capable machine and are skipped by default. To include them:
+
+```bat
+set STL2PDF_RENDER_TESTS=1
+python -m pytest
+```
 
 ## Troubleshooting
 
